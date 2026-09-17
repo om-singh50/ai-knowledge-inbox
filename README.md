@@ -1,71 +1,249 @@
 # AI Knowledge Inbox
 
-AI Knowledge Inbox is a simple, single-user web application designed for personal knowledge management. It allows users to save plain-text notes and URLs, extract their content, generate embeddings using the Gemini API, and use Retrieval-Augmented Generation (RAG) to ask questions and receive answers based on the ingested knowledge.
+AI Knowledge Inbox is a full-stack, single-user Retrieval-Augmented Generation (RAG) application. It allows users to save plain-text notes and extract content from URLs, automatically chunking and embedding the information into a local knowledge base to answer natural language questions with source citations.
 
-## Architecture
+## Features
 
-The system consists of a REST API backend that manages data ingestion, embedding generation, and RAG logic, alongside a React frontend user interface for interaction.
+- **Ingestion**: Supports plain-text note ingestion and URL ingestion with server-side fetching and HTML content extraction.
+- **RAG Pipeline**: Deterministic chunking, semantic retrieval, and grounded answer generation using Gemini models.
+- **Vector Storage**: Lightweight SQLite storage with a custom Python-based linear cosine similarity search.
+- **Frontend**: Responsive React UI (built with Vite and Tailwind CSS) featuring validation, loading states, error handling, and empty states.
+- **Citations**: Returns exact source snippets and relevance scores used to generate the answer.
 
 ## Tech Stack
 
-- **Backend:** Python, FastAPI
-- **Database:** SQLite
-- **Embeddings:** Gemini API via `google-genai`
-- **Similarity Search:** In-memory linear cosine similarity (Python)
-- **LLM:** Gemini API via `google-genai`
-- **Frontend:** React, Vite, Tailwind CSS
+- **Backend**: Python, FastAPI, SQLite, Pydantic, httpx, BeautifulSoup, `google-genai`
+- **Frontend**: React, Vite, Tailwind CSS
 
-## Environment Variables
+## Architecture
 
-Create a `.env` file in the `backend/` directory with the following variables:
-
-```env
-GEMINI_API_KEY=your_gemini_api_key_here
+```text
+  [ React Frontend ]
+         │
+         ▼ (HTTP POST /ingest, POST /query)
+  [ FastAPI Backend ]
+         │
+         ├─► Ingestion Service (Extract, Chunk, Embed)
+         │         │
+         │         ▼
+         │   [ SQLite DB (Documents + Embeddings) ]
+         │
+         └─► Query Service
+                   │
+                   ├─► 1. Embed user question
+                   ├─► 2. Retrieve top-K chunks (Linear Cosine Similarity)
+                   └─► 3. Generate answer (Gemini) with source metadata
 ```
 
-## How to Run
+## RAG Pipeline
 
-### Backend
+1. **Ingestion Flow (Notes)**: The raw text is directly normalized, chunked, and embedded.
+2. **Ingestion Flow (URLs)**: The server fetches the URL, validates the content type, strips HTML noise (scripts, styles, headers), and extracts readable text before chunking and embedding.
+3. **Query Flow**: Retrieval happens strictly *before* generation. The system embeds the user's question, performs a linear search over stored embeddings to find the most relevant chunks, and then passes those specific chunks to the generation model. Source metadata (URL, title, snippet) is constructed deterministically by the application logic, not fabricated by the AI.
 
-1. Navigate to the `backend/` directory.
-2. Install dependencies (e.g. `pip install -r requirements.txt`).
-3. Run the development server: `uvicorn app.main:app --reload`
-The backend will be available at `http://localhost:8000`.
+## Chunking Strategy
 
-### Frontend
+- **Strategy**: Paragraph-aware deterministic chunking.
+- **Size Constraints**: Approximately 1,000-character maximum chunks with a ~150-character overlap.
+- **Why**: Preserves semantic context across paragraph boundaries without exceeding model context window constraints. Overlap ensures that concepts split across two chunks retain contextual continuity.
+- **Tradeoff**: Very large single paragraphs without natural breaks may be split mid-sentence.
 
-1. Navigate to the `frontend/` directory.
-2. Install dependencies: `npm install`
-3. Run the development server: `npm run dev`
-The frontend will be available at `http://localhost:5173`.
+## Vector Storage and Search
 
-## API Endpoints
+- **Implementation**: Embeddings are stored as BLOB/JSON in a standard SQLite database. Search is implemented in Python using exact linear cosine similarity calculation.
+- **Complexity**: $O(N \times D)$ where $N$ is the number of chunks and $D$ is the embedding dimensionality.
+- **Why**: For a single-user assignment or small personal knowledge base, a linear scan in memory is sufficiently fast and avoids the heavy dependency of a dedicated vector database (like Qdrant or Milvus).
+- **Scale**: At scale (millions of documents), this approach would become a bottleneck and require an Approximate Nearest Neighbor (ANN) index.
 
-- `POST /ingest`: Accepts a note (text) or a URL. For URLs, it fetches the content. It then chunks the text, calls the Gemini API to generate embeddings, and saves the chunks, embeddings, and metadata to the database.
-- `GET /items`: Lists all saved knowledge items (notes and URLs) with their metadata.
-- `POST /query`: Accepts a user question. It embeds the question, retrieves the most relevant chunks using cosine similarity, and passes the chunks as context to the Gemini API to generate an answer with cited sources.
+## AI Models
 
-## RAG Flow
+- **Embedding Model**: `gemini-embedding-001`
+- **Generation Model**: `gemini-3.6-flash`
+- **Considerations**: The application requires a valid Google Gemini API key. Rate limits and quota constraints of the Gemini API apply. Embeddings are generated remotely via the API.
 
-The application follows a standard Retrieval-Augmented Generation (RAG) pipeline:
-1. **Ingestion:** User submits a URL or plain-text note. Content is extracted.
-2. **Chunking:** The content is split into smaller, overlapping chunks.
-3. **Gemini Embeddings:** Each chunk is sent to the Gemini API to generate a vector embedding.
-4. **SQLite:** Chunks, embeddings, and metadata are persisted in a SQLite database.
-5. **Cosine Retrieval:** When a user queries, the question is embedded, and the most relevant chunks are found using a linear cosine similarity search in Python.
-6. **Gemini Generation:** The retrieved chunks are provided as context to a Gemini model to generate a natural language response.
-7. **Answer + Sources:** The generated answer and the source chunks used are returned to the user.
+## URL Extraction and Security
 
-## Design Decisions
+The URL extraction pipeline includes several protections:
+- **Server-side Fetch**: Uses asynchronous `httpx` fetching.
+- **Security**: Validates schemes (`http`/`https`) and explicitly rejects localhost or private IP addresses to prevent Server-Side Request Forgery (SSRF).
+- **Resilience**: 10-second timeout, maximum of 5 redirects, and a strict 5 MB response size limit.
+- **Parsing**: Uses `BeautifulSoup` to strip non-content tags and extract core article text.
 
-- **SQLite + Linear Cosine Search:** Chosen for simplicity and zero-configuration setup for a local, single-user environment. Since the expected dataset is small (personal notes), a full vector database is unnecessary overhead. The embeddings are loaded into memory and compared using simple vector math, which is fast for small-scale datasets.
-- **Chunking Strategy:** Content is split into chunks of fixed character length with a slight overlap. This preserves context across chunk boundaries while ensuring chunks fit within embedding model limits and provide granular retrieval.
-- **Dev-Environment Focus:** The app is built to run entirely locally without complex infrastructure (like Docker or external DBs), utilizing free-tier AI API resources (Gemini API) rather than requiring heavy local GPUs for embeddings or LLM inference. Note that this application does not include authentication and is not intended for production-scale deployment.
+## API Documentation
+
+### `POST /ingest`
+Ingests a new document into the knowledge base.
+- **Example Request (Note)**:
+  ```json
+  {
+    "source_type": "note",
+    "title": "Meeting Notes",
+    "content": "Discussed the new RAG architecture..."
+  }
+  ```
+- **Example Request (URL)**:
+  ```json
+  {
+    "source_type": "url",
+    "url": "https://example.com/article"
+  }
+  ```
+- **Validation**: Enforces that `content` cannot be provided for URLs, and `url` cannot be provided for notes.
+- **Example Response**:
+  ```json
+  {
+    "id": "uuid-1234",
+    "source_type": "url",
+    "title": "Example Domain",
+    "url": "https://example.com/article",
+    "created_at": "2026-09-17T10:00:00Z",
+    "chunk_count": 3
+  }
+  ```
+
+### `GET /items`
+Retrieves a list of all saved knowledge items.
+- **Example Response**:
+  ```json
+  [
+    {
+      "id": "uuid-1234",
+      "source_type": "url",
+      "title": "Example Domain",
+      "source": "https://example.com/article",
+      "created_at": "2026-09-17T10:00:00Z"
+    }
+  ]
+  ```
+
+### `POST /query`
+Asks a question against the knowledge base.
+- **Example Request**:
+  ```json
+  {
+    "question": "What is the new RAG architecture?"
+  }
+  ```
+- **Example Response**:
+  ```json
+  {
+    "answer": "The new architecture uses SQLite and Gemini models...",
+    "sources": [
+      {
+        "document_id": "uuid-1234",
+        "source_type": "note",
+        "title": "Meeting Notes",
+        "url": null,
+        "content": "Discussed the new RAG architecture...",
+        "relevance_score": 0.89
+      }
+    ]
+  }
+  ```
+
+## Project Structure
+
+```text
+.
+├── backend/
+│   ├── app/
+│   │   ├── api/        # FastAPI routers
+│   │   ├── core/       # Configuration
+│   │   ├── db/         # SQLite database and repository
+│   │   ├── schemas/    # Pydantic models
+│   │   └── services/   # Chunking, scraping, embedding, RAG logic
+│   ├── tests/          # Test suite
+│   └── requirements.txt
+└── frontend/
+    ├── src/
+    │   ├── components/ # React components
+    │   └── App.jsx     # Main layout
+    ├── package.json
+    └── vite.config.js
+```
+
+## Setup and Installation
+
+### 1. Backend Setup
+Navigate to the `backend` directory and set up the Python environment:
+```bash
+cd backend
+python -m venv venv
+
+# Activate virtual environment
+# Windows:
+venv\Scripts\activate
+# macOS/Linux:
+# source venv/bin/activate
+
+pip install -r requirements.txt
+```
+
+Set up the required environment variables by creating a `.env` file in the `backend` directory:
+```env
+GEMINI_API_KEY="your_api_key_here"
+```
+*(Do not commit this `.env` file to version control.)*
+
+Start the FastAPI server:
+```bash
+uvicorn app.main:app --reload
+```
+
+### 2. Frontend Setup
+Navigate to the `frontend` directory:
+```bash
+cd frontend
+npm install
+```
+
+Create a `.env` file in the `frontend` directory:
+```env
+VITE_BACKEND_URL="http://127.0.0.1:8000"
+```
+*(Do not commit this `.env` file to version control.)*
+
+Start the Vite development server:
+```bash
+npm run dev
+```
+
+To create a production build:
+```bash
+npm run build
+```
+
+## Testing
+
+The backend includes a comprehensive automated test suite (14 test files) covering unit and integration tests across routers, database, services, and schemas. External network calls (`httpx` scraping) and AI API calls (`google-genai`) are mocked to ensure reliable and fast execution without relying on live endpoints.
+
+Run the tests using `pytest` (ensure the virtual environment is active):
+```bash
+cd backend
+pytest tests/
+```
+
+## Manual Verification
+
+The following flows have been manually verified:
+- **Note Ingestion**: Successful creation, chunking, and embedding of text notes.
+- **URL Ingestion**: Successful fetching, content extraction, and embedding of valid URLs; proper error handling of invalid/timeout URLs.
+- **Querying**: Semantic retrieval returning contextually relevant snippets that correctly ground the LLM answer.
+- **Source Display**: React UI correctly presents the answer along with metadata and original chunks.
+- **No-evidence Behavior**: The system gracefully handles queries lacking relevant internal knowledge by stating it cannot answer based on provided context.
+
+## Design Decisions and Tradeoffs
+
+- **No Authentication**: The assignment scope implies a single-user system, avoiding the complexity of auth and multi-tenancy.
+- **SQLite + Linear Search**: Using SQLite avoids the operational overhead of managing a dedicated vector database or background workers. Linear search is highly performant for small datasets but trades off scalability.
+- **Simple Chunking**: A deterministic character/paragraph-based chunking strategy was chosen over complex NLP-based chunking libraries to minimize dependencies and maintain full control over the logic.
+- **Direct Service Separation**: The architecture explicitly separates chunking, embedding, scraping, and RAG services, keeping the implementation clean without overengineering with abstraction-heavy frameworks.
 
 ## Scaling Considerations
 
-To scale this application for multiple users or large knowledge bases, the following changes would be required:
-- **Vector Database:** Replace SQLite and in-memory linear search with a dedicated vector database (e.g., Pinecone, Milvus, Qdrant, pgvector) for efficient approximate nearest neighbor (ANN) search.
-- **Background Workers:** Move document ingestion, fetching, and embedding generation into background tasks (e.g., Celery) to prevent blocking the API.
-- **Authentication & Authorization:** Add user authentication and ensure users can only query their own ingested knowledge.
-- **Production Infrastructure:** Deploy using Docker, use a production ASGI server like Gunicorn, and use a robust relational database (e.g., PostgreSQL) for application metadata.
+To evolve this application for production scale, the following changes would be required:
+1. **Vector Infrastructure**: As the document count grows, the $O(N \times D)$ linear search would degrade latency. This would necessitate migrating to a dedicated vector database with Approximate Nearest Neighbor (ANN) indexing.
+2. **Relational Database**: Migrate SQLite to PostgreSQL for better concurrency handling and data integrity.
+3. **Background Processing**: Synchronous URL fetching and embedding during the `POST /ingest` request will timeout on large sites. Ingestion should move to an asynchronous background worker queue.
+4. **Authentication & Multi-tenancy**: Adding users requires robust authentication and tenancy filtering on vector retrieval.
+5. **Rate Limiting & Observability**: Implement strict API rate limiting and comprehensive telemetry to monitor LLM token usage and latency.
